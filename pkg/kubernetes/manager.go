@@ -36,6 +36,14 @@ func NewKubeconfigManager(ctx context.Context, config api.BaseConfig, kubeconfig
 		return nil, ErrorKubeconfigInClusterNotAllowed
 	}
 
+	// When the full kubeconfig is provided inline via KUBECONFIG_YAML, load it
+	// from memory instead of from a file. This avoids materializing a temp file
+	// and sidesteps client-go's KUBECONFIG env var, which is parsed as a
+	// colon-separated path list and breaks when the path itself contains a ':'.
+	if inline := os.Getenv("KUBECONFIG_YAML"); inline != "" {
+		return newKubeconfigManagerFromBytes(ctx, config, []byte(inline), kubeconfigContext)
+	}
+
 	pathOptions := clientcmd.NewDefaultPathOptions()
 	if config.GetKubeConfigPath() != "" {
 		pathOptions.LoadingRules.ExplicitPath = config.GetKubeConfigPath()
@@ -61,6 +69,36 @@ func NewKubeconfigManager(ctx context.Context, config api.BaseConfig, kubeconfig
 	return NewManager(ctx, config, restConfig, clientCmdConfig)
 }
 
+// newKubeconfigManagerFromBytes builds a Manager from an in-memory kubeconfig
+// (the raw YAML/JSON content), mirroring NewKubeconfigManager's path-based flow.
+// A non-nil but empty ClientConfigLoadingRules is used as the ConfigAccess so the
+// kubeconfig file watcher finds zero files to watch and no-ops cleanly.
+func newKubeconfigManagerFromBytes(ctx context.Context, config api.BaseConfig, raw []byte, kubeconfigContext string) (*Manager, error) {
+	apiConfig, err := clientcmd.Load(raw)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load kubeconfig from KUBECONFIG_YAML: %w", err)
+	}
+
+	resolvedContext, err := resolveContextFromRawConfig(ctx, apiConfig, kubeconfigContext)
+	if err != nil {
+		return nil, err
+	}
+
+	clientCmdConfig := clientcmd.NewNonInteractiveClientConfig(
+		*apiConfig,
+		resolvedContext,
+		&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: ""}},
+		&clientcmd.ClientConfigLoadingRules{},
+	)
+
+	restConfig, err := clientCmdConfig.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes rest config from kubeconfig: %w", err)
+	}
+
+	return NewManager(ctx, config, restConfig, clientCmdConfig)
+}
+
 // resolveKubeconfigContext determines which kubeconfig context to use.
 // If kubeconfigContext is explicitly set, it is returned as-is.
 // If it is empty, the function loads the kubeconfig and:
@@ -75,6 +113,16 @@ func resolveKubeconfigContext(ctx context.Context, loadingRules *clientcmd.Clien
 	rawConfig, err := loadingRules.Load()
 	if err != nil {
 		return "", fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	return resolveContextFromRawConfig(ctx, rawConfig, kubeconfigContext)
+}
+
+// resolveContextFromRawConfig applies the context-selection rules to an
+// already-loaded kubeconfig (see resolveKubeconfigContext).
+func resolveContextFromRawConfig(ctx context.Context, rawConfig *clientcmdapi.Config, kubeconfigContext string) (string, error) {
+	if kubeconfigContext != "" {
+		return kubeconfigContext, nil
 	}
 
 	if rawConfig.CurrentContext != "" {
