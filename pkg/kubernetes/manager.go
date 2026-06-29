@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/containers/kubernetes-mcp-server/pkg/api"
 	"k8s.io/client-go/rest"
@@ -137,6 +139,20 @@ func NewInClusterManager(ctx context.Context, config api.BaseConfig) (*Manager, 
 	return NewManager(ctx, config, restConfig, clientcmd.NewDefaultClientConfig(*clientCmdConfig, nil))
 }
 
+// dialAddrOverride returns a rest.Config Dial func that routes every API-server
+// connection to the address in KUBERNETES_DIAL_ADDR, leaving Host / TLS
+// ServerName / CA verification untouched. Returns nil when the env var is unset.
+func dialAddrOverride() func(ctx context.Context, network, address string) (net.Conn, error) {
+	dialAddr := os.Getenv("KUBERNETES_DIAL_ADDR")
+	if dialAddr == "" {
+		return nil
+	}
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return d.DialContext(ctx, network, dialAddr)
+	}
+}
+
 func NewManager(ctx context.Context, config api.BaseConfig, restConfig *rest.Config, clientCmdConfig clientcmd.ClientConfig) (*Manager, error) {
 	if config == nil {
 		return nil, errors.New("config cannot be nil")
@@ -150,6 +166,18 @@ func NewManager(ctx context.Context, config api.BaseConfig, restConfig *rest.Con
 
 	// Apply QPS and Burst from environment variables if set (primarily for testing)
 	applyRateLimitFromEnv(restConfig)
+
+	// KUBERNETES_DIAL_ADDR overrides only the TCP socket destination: the API
+	// server connection is dialed to this host:port instead of the kubeconfig
+	// server host, while Host, TLS ServerName and CA verification all stay
+	// derived from the real kubeconfig (so TLS verifies end-to-end). This is the
+	// connector case: the kubeconfig server stays the real https API-server host
+	// but the socket lands on the loopback tunnel proxy (127.0.0.1:PORT).
+	// rest.CopyConfig (in NewKubernetes) copies Dial, so this propagates to the
+	// clientset, dynamic, discovery and metrics clients built from restConfig.
+	if dial := dialAddrOverride(); dial != nil {
+		restConfig.Dial = dial
+	}
 
 	k8s := &Manager{
 		config: config,
@@ -207,6 +235,9 @@ func (m *Manager) Derived(ctx context.Context) (*Kubernetes, error) {
 		Burst:       m.kubernetes.RESTConfig().Burst,
 		Timeout:     m.kubernetes.RESTConfig().Timeout,
 		Impersonate: rest.ImpersonationConfig{},
+		// Preserve any KUBERNETES_DIAL_ADDR socket override on the derived
+		// (OAuth bearer-token) config too, so it dials through the same proxy.
+		Dial: m.kubernetes.RESTConfig().Dial,
 	}
 	clientCmdApiConfig, err := m.kubernetes.clientCmdConfig.RawConfig()
 	if err != nil {
