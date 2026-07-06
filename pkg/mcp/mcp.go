@@ -166,6 +166,7 @@ func NewServer(ctx context.Context, configuration Configuration, targetProvider 
 	)
 	s.server.AddReceivingMiddleware(tracingMiddleware(version.BinaryName + "/mcp"))
 	s.server.AddReceivingMiddleware(authHeaderPropagationMiddleware)
+	s.server.AddReceivingMiddleware(kubeconfigPropagationMiddleware)
 	s.server.AddReceivingMiddleware(userAgentPropagationMiddleware(version.BinaryName, version.Version))
 	s.server.AddReceivingMiddleware(protocolReceivingMiddleware)
 	s.server.AddReceivingMiddleware(s.metricsMiddleware())

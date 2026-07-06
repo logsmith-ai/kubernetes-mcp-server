@@ -28,6 +28,14 @@ const (
 	CustomAuthorizationHeader = HeaderKey("kubernetes-authorization")
 	OAuthAuthorizationHeader  = HeaderKey("Authorization")
 	UserAgentHeader           = HeaderKey("User-Agent")
+	// KubeconfigHeader carries a tenant's full kubeconfig (base64-encoded YAML)
+	// on each streamable-HTTP request; the ctx value holds the DECODED content.
+	KubeconfigHeader = HeaderKey("X-Kubeconfig")
+	// DialAddrHeader overrides only the TCP socket destination for the tenant's
+	// API-server connections (loopback tunnel proxy), leaving Host/TLS/CA
+	// verification derived from the kubeconfig. Per-request analogue of the
+	// KUBERNETES_DIAL_ADDR env var.
+	DialAddrHeader = HeaderKey("X-Kubernetes-Dial-Addr")
 
 	CustomUserAgent = "kubernetes-mcp-server/bearer-token-auth"
 )
