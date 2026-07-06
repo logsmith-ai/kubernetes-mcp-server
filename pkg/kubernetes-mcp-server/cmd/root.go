@@ -66,6 +66,7 @@ const (
 	flagLogFile              = "log-file"
 	flagConfig               = "config"
 	flagConfigDir            = "config-dir"
+	flagHost                 = "host"
 	flagPort                 = "port"
 	flagSSEBaseUrl           = "sse-base-url"
 	flagKubeconfig           = "kubeconfig"
@@ -91,6 +92,7 @@ type MCPServerOptions struct {
 	Version              bool
 	LogLevel             int
 	LogFile              string
+	Host                 string
 	Port                 string
 	SSEBaseUrl           string
 	Kubeconfig           string
@@ -164,6 +166,7 @@ func NewMCPServer(streams genericiooptions.IOStreams) *cobra.Command {
 	cmd.Flags().StringVar(&o.LogFile, flagLogFile, o.LogFile, "Defines the server log file path. Required for logging in stdio mode; overrides stdout in HTTP mode. Set to \"stderr\" to log to the standard error stream.")
 	cmd.Flags().StringVar(&o.ConfigPath, flagConfig, o.ConfigPath, "Path of the config file.")
 	cmd.Flags().StringVar(&o.ConfigDir, flagConfigDir, o.ConfigDir, "Path to drop-in configuration directory (files loaded in lexical order). Defaults to "+config.DefaultDropInConfigDir+" relative to the config file if --config is set.")
+	cmd.Flags().StringVar(&o.Host, flagHost, o.Host, "Bind interface for the HTTP server (e.g. 127.0.0.1 or ::1). Empty (default) binds to all interfaces.")
 	cmd.Flags().StringVar(&o.Port, flagPort, o.Port, "Start a streamable HTTP and SSE HTTP server on the specified port (e.g. 8080)")
 	cmd.Flags().StringVar(&o.SSEBaseUrl, flagSSEBaseUrl, o.SSEBaseUrl, "SSE public base URL to use when sending the endpoint message (e.g. https://example.com)")
 	cmd.Flags().StringVar(&o.Kubeconfig, flagKubeconfig, o.Kubeconfig, "Path to the kubeconfig file to use for authentication")
@@ -224,6 +227,9 @@ func (m *MCPServerOptions) loadFlags(cmd *cobra.Command) {
 	}
 	if cmd.Flag(flagLogFile).Changed {
 		m.StaticConfig.LogFile = m.LogFile
+	}
+	if cmd.Flag(flagHost).Changed {
+		m.StaticConfig.Host = m.Host
 	}
 	if cmd.Flag(flagPort).Changed {
 		m.StaticConfig.Port = m.Port

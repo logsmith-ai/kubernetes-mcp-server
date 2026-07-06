@@ -37,6 +37,7 @@ type StaticConfig struct {
 
 	LogLevel   int    `toml:"log_level,omitzero"`
 	LogFile    string `toml:"log_file,omitempty"`
+	Host       string `toml:"host,omitempty"`
 	Port       string `toml:"port,omitempty"`
 	SSEBaseURL string `toml:"sse_base_url,omitempty"`
 	KubeConfig string `toml:"kubeconfig,omitempty"`

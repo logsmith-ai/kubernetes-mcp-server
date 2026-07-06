@@ -1127,6 +1127,41 @@ func (s *ConfigSuite) TestToolOverridesDropInMerge() {
 	})
 }
 
+func (s *ConfigSuite) TestHostDefaultIsEmpty() {
+	configPath := s.writeConfig(`
+		log_level = 1
+		port = "8080"
+	`)
+
+	config, err := Read(s.T().Context(), configPath, "")
+	s.Require().NoError(err)
+	s.Require().NotNil(config)
+
+	s.Run("host defaults to empty string", func() {
+		s.Equal("", config.Host, "Expected Host to default to empty string (all interfaces)")
+	})
+}
+
+func (s *ConfigSuite) TestHostRoundTrip() {
+	configPath := s.writeConfig(`
+		log_level = 1
+		port = "8080"
+		host = "127.0.0.1"
+	`)
+
+	config, err := Read(s.T().Context(), configPath, "")
+	s.Require().NoError(err)
+	s.Require().NotNil(config)
+
+	s.Run("host parses correctly", func() {
+		s.Equal("127.0.0.1", config.Host, "Expected Host to be 127.0.0.1")
+	})
+
+	s.Run("host round-trips", func() {
+		s.Equalf("127.0.0.1", config.Host, "Expected Host to be 127.0.0.1, got %s", config.Host)
+	})
+}
+
 func (s *ConfigSuite) TestConfirmationRulesDefaults() {
 	configPath := s.writeConfig(``)
 	config, err := Read(s.T().Context(), configPath, "")

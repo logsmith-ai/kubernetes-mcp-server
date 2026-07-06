@@ -124,7 +124,7 @@ func Serve(ctx context.Context, mcpServer *mcp.Server, cfgState *config.StaticCo
 	// ReadHeaderTimeout provides Slowloris protection; other timeouts are left
 	// at Go defaults since MCP clients maintain persistent connections.
 	httpServer := &http.Server{
-		Addr:              ":" + staticConfig.Port,
+		Addr:              staticConfig.Host + ":" + staticConfig.Port,
 		Handler:           instrumentedHandler,
 		ReadHeaderTimeout: staticConfig.HTTP.ReadHeaderTimeout.Duration(),
 		TLSConfig: &tls.Config{
