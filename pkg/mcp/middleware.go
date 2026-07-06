@@ -47,6 +47,9 @@ var redactedHeaders = map[string]bool{
 	"x-auth-token": true,
 	// Project-specific kubernetes auth header forwarded by HTTP middleware.
 	string(internalk8s.CustomAuthorizationHeader): true,
+	// Per-tenant kubeconfig header (base64 YAML) — the decoded content can
+	// embed bearer tokens and client keys, so the raw blob must not be logged.
+	string(internalk8s.KubeconfigHeader): true,
 }
 
 // protocolReceivingMiddleware logs inbound MCP method calls (client → server)

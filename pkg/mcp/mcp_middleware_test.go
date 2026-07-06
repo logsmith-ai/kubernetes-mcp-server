@@ -90,6 +90,26 @@ func (s *McpLoggingSuite) TestLogsToolCallHeaders() {
 	})
 }
 
+// TestLogsRedactsKubeconfigHeader asserts that the X-Kubeconfig header (a
+// base64 kubeconfig whose decoded content can embed bearer tokens and client
+// keys) is on the redactedHeaders denylist and never lands in V(7) dumps.
+func (s *McpLoggingSuite) TestLogsRedactsKubeconfigHeader() {
+	s.SetLogLevel(7)
+	encoded := base64.StdEncoding.EncodeToString([]byte("apiVersion: v1\nkind: Config\n"))
+	s.InitMcpClient(test.WithHTTPHeaders(map[string]string{
+		string(internalk8s.KubeconfigHeader): encoded,
+	}))
+	_, err := s.CallTool("configuration_view", map[string]any{"minified": false})
+	s.Require().NoError(err, "call to tool configuration_view failed")
+
+	s.Run("Does not log X-Kubeconfig header", func() {
+		s.NotContains(s.logBuffer.String(), "X-Kubeconfig:", "Log should not contain the X-Kubeconfig header name")
+	})
+	s.Run("Does not log X-Kubeconfig header value", func() {
+		s.NotContains(s.logBuffer.String(), encoded, "Log should not contain the base64 kubeconfig blob")
+	})
+}
+
 // TestLogsRedactsSensitiveParams asserts that the V(6) protocol-receiving
 // middleware runs payloads through mcplog.Sanitize, so inline tokens / JWTs
 // embedded in tool arguments do not land in the log file in cleartext. The
