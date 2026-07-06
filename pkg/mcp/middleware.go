@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"runtime"
@@ -46,6 +47,9 @@ var redactedHeaders = map[string]bool{
 	"x-auth-token": true,
 	// Project-specific kubernetes auth header forwarded by HTTP middleware.
 	string(internalk8s.CustomAuthorizationHeader): true,
+	// Per-tenant kubeconfig header (base64 YAML) — the decoded content can
+	// embed bearer tokens and client keys, so the raw blob must not be logged.
+	string(internalk8s.KubeconfigHeader): true,
 }
 
 // protocolReceivingMiddleware logs inbound MCP method calls (client → server)
@@ -171,6 +175,28 @@ func authHeaderPropagationMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 
 		// If no auth header in RequestExtra, context may already have it from HTTP middleware
 		// (used by SSE transport where HTTP headers aren't propagated to RequestExtra)
+		return next(ctx, method, req)
+	}
+}
+
+// kubeconfigPropagationMiddleware copies the per-tenant cluster config headers
+// (X-Kubeconfig, base64-encoded; X-Kubernetes-Dial-Addr) from the streamable-HTTP
+// request onto the context, where the request-headers cluster provider reads
+// them. Headers absent -> no-op (stdio and single-tenant modes unaffected).
+func kubeconfigPropagationMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if req.GetExtra() != nil && req.GetExtra().Header != nil {
+			if encoded := req.GetExtra().Header.Get(string(internalk8s.KubeconfigHeader)); encoded != "" {
+				raw, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil {
+					return nil, fmt.Errorf("invalid %s header: not valid base64: %w", internalk8s.KubeconfigHeader, err)
+				}
+				ctx = context.WithValue(ctx, internalk8s.KubeconfigHeader, string(raw))
+			}
+			if dialAddr := req.GetExtra().Header.Get(string(internalk8s.DialAddrHeader)); dialAddr != "" {
+				ctx = context.WithValue(ctx, internalk8s.DialAddrHeader, dialAddr)
+			}
+		}
 		return next(ctx, method, req)
 	}
 }

@@ -2,16 +2,20 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
+	"net/http"
 	"strconv"
 	"testing"
 
 	"errors"
 
 	"github.com/containers/kubernetes-mcp-server/internal/test"
+	internalk8s "github.com/containers/kubernetes-mcp-server/pkg/kubernetes"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -83,6 +87,26 @@ func (s *McpLoggingSuite) TestLogsToolCallHeaders() {
 	})
 	s.Run("Does not log sensitive header values", func() {
 		s.NotContains(s.logBuffer.String(), "should-not-be-logged", "Log should not contain sensitive header value")
+	})
+}
+
+// TestLogsRedactsKubeconfigHeader asserts that the X-Kubeconfig header (a
+// base64 kubeconfig whose decoded content can embed bearer tokens and client
+// keys) is on the redactedHeaders denylist and never lands in V(7) dumps.
+func (s *McpLoggingSuite) TestLogsRedactsKubeconfigHeader() {
+	s.SetLogLevel(7)
+	encoded := base64.StdEncoding.EncodeToString([]byte("apiVersion: v1\nkind: Config\n"))
+	s.InitMcpClient(test.WithHTTPHeaders(map[string]string{
+		string(internalk8s.KubeconfigHeader): encoded,
+	}))
+	_, err := s.CallTool("configuration_view", map[string]any{"minified": false})
+	s.Require().NoError(err, "call to tool configuration_view failed")
+
+	s.Run("Does not log X-Kubeconfig header", func() {
+		s.NotContains(s.logBuffer.String(), "X-Kubeconfig:", "Log should not contain the X-Kubeconfig header name")
+	})
+	s.Run("Does not log X-Kubeconfig header value", func() {
+		s.NotContains(s.logBuffer.String(), encoded, "Log should not contain the base64 kubeconfig blob")
 	})
 }
 
@@ -508,4 +532,83 @@ func (s *RateLimitingSuite) TestDoubleCloseDoesNotPanic() {
 
 func TestRateLimiting(t *testing.T) {
 	suite.Run(t, new(RateLimitingSuite))
+}
+
+// TestKubeconfigPropagationMiddleware asserts that a well-formed pair of
+// X-Kubeconfig (base64) / X-Kubernetes-Dial-Addr headers on RequestExtra
+// lands on the context as the decoded kubeconfig content and the raw dial
+// address string, respectively. Construction mirrors TestSessionBypass
+// above: a bare *mcp.ServerRequest built and dispatched directly through the
+// middleware, without spinning up a full server/session.
+func TestKubeconfigPropagationMiddleware(t *testing.T) {
+	kubeconfig := "apiVersion: v1\nkind: Config\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(kubeconfig))
+
+	header := http.Header{}
+	header.Set(string(internalk8s.KubeconfigHeader), encoded)
+	header.Set(string(internalk8s.DialAddrHeader), "127.0.0.1:39001")
+
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{},
+		Extra:  &mcp.RequestExtra{Header: header},
+	}
+
+	var gotKubeconfig, gotDial string
+	next := func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		gotKubeconfig, _ = ctx.Value(internalk8s.KubeconfigHeader).(string)
+		gotDial, _ = ctx.Value(internalk8s.DialAddrHeader).(string)
+		return nil, nil
+	}
+
+	_, err := kubeconfigPropagationMiddleware(next)(context.Background(), "tools/call", req)
+	require.NoError(t, err)
+	require.Equal(t, kubeconfig, gotKubeconfig)
+	require.Equal(t, "127.0.0.1:39001", gotDial)
+}
+
+// TestKubeconfigPropagationMiddlewareBadBase64 asserts that an X-Kubeconfig
+// header that fails base64 decoding fails the request outright rather than
+// silently falling through to some default cluster.
+func TestKubeconfigPropagationMiddlewareBadBase64(t *testing.T) {
+	header := http.Header{}
+	header.Set(string(internalk8s.KubeconfigHeader), "!!!not-base64!!!")
+
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{},
+		Extra:  &mcp.RequestExtra{Header: header},
+	}
+
+	called := false
+	next := func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		called = true
+		return nil, nil
+	}
+
+	_, err := kubeconfigPropagationMiddleware(next)(context.Background(), "tools/call", req)
+	require.Error(t, err)
+	require.False(t, called, "next must not be called when X-Kubeconfig fails to decode")
+}
+
+// TestKubeconfigPropagationMiddlewareNoHeaders asserts that requests without
+// either header are a no-op: next is called with an unmodified context and
+// no error, so stdio and single-tenant modes are unaffected.
+func TestKubeconfigPropagationMiddlewareNoHeaders(t *testing.T) {
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{},
+	}
+
+	called := false
+	var gotKubeconfig, gotDial string
+	next := func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		called = true
+		gotKubeconfig, _ = ctx.Value(internalk8s.KubeconfigHeader).(string)
+		gotDial, _ = ctx.Value(internalk8s.DialAddrHeader).(string)
+		return nil, nil
+	}
+
+	_, err := kubeconfigPropagationMiddleware(next)(context.Background(), "tools/call", req)
+	require.NoError(t, err)
+	require.True(t, called)
+	require.Empty(t, gotKubeconfig)
+	require.Empty(t, gotDial)
 }

@@ -5,6 +5,11 @@ const (
 	ClusterProviderInCluster  = "in-cluster"
 	ClusterProviderDisabled   = "disabled"
 	ClusterProviderKcp        = "kcp"
+	// ClusterProviderRequestHeaders serves a shared multi-tenant HTTP process:
+	// every request carries its own kubeconfig (X-Kubeconfig) and optional
+	// socket dial override (X-Kubernetes-Dial-Addr). No cluster configuration
+	// is needed (or read) at startup.
+	ClusterProviderRequestHeaders = "request-headers"
 )
 
 // ClusterAuthMode constants define how the MCP server authenticates to the cluster.
