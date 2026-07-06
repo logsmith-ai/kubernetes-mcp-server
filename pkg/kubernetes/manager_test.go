@@ -1,13 +1,16 @@
 package kubernetes
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/containers/kubernetes-mcp-server/internal/test"
 	"github.com/containers/kubernetes-mcp-server/pkg/config"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -267,4 +270,101 @@ func (s *ManagerTestSuite) TestNewManager() {
 
 func TestManager(t *testing.T) {
 	suite.Run(t, new(ManagerTestSuite))
+}
+
+// fakeInlineKubeconfig builds a minimal single-cluster/single-context/token-auth
+// kubeconfig, serialized to bytes as NewInlineKubeconfigManager consumes it.
+// The host deliberately does not resolve, so any test that reaches out over
+// the network without a dial-addr override would hang/fail on DNS, proving the
+// override (not the real host) is what's actually dialed.
+func fakeInlineKubeconfig(t *testing.T, server string) []byte {
+	t.Helper()
+	cfg := clientcmdapi.NewConfig()
+	cfg.Clusters["fake"] = clientcmdapi.NewCluster()
+	cfg.Clusters["fake"].Server = server
+	cfg.AuthInfos["fake"] = clientcmdapi.NewAuthInfo()
+	cfg.AuthInfos["fake"].Token = "fake-token"
+	cfg.Contexts["fake-context"] = clientcmdapi.NewContext()
+	cfg.Contexts["fake-context"].Cluster = "fake"
+	cfg.Contexts["fake-context"].AuthInfo = "fake"
+	cfg.CurrentContext = "fake-context"
+	raw, err := clientcmd.Write(*cfg)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestNewInlineKubeconfigManager(t *testing.T) {
+	kubeconfig := fakeInlineKubeconfig(t, "https://kubernetes.does-not-resolve.internal:6443")
+	m, err := NewInlineKubeconfigManager(t.Context(), &config.StaticConfig{}, kubeconfig, "")
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	t.Cleanup(m.Close)
+}
+
+func TestNewInlineKubeconfigManagerDialAddr(t *testing.T) {
+	// A local TCP listener plays the tunnel proxy. Building the manager with
+	// dialAddr and making any API call must open a socket to the listener
+	// even though the kubeconfig host cannot resolve.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	connCh := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			connCh <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+
+	kubeconfig := fakeInlineKubeconfig(t, "https://kubernetes.does-not-resolve.internal:6443")
+	m, err := NewInlineKubeconfigManager(t.Context(), &config.StaticConfig{}, kubeconfig, ln.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(m.Close)
+
+	// Trigger one real connection attempt (TLS will fail — we only assert the socket landed on the listener).
+	_, _ = m.kubernetes.DiscoveryClient().ServerVersion()
+
+	select {
+	case <-connCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no connection reached the dial-addr listener")
+	}
+}
+
+func TestNewInlineKubeconfigManagerIgnoresEnv(t *testing.T) {
+	// The inline/multi-tenant path must never be influenced by the process-wide
+	// stdio knobs: a stray KUBECONFIG_YAML/KUBERNETES_DIAL_ADDR in the shared
+	// server's environment must not leak into (or override) a tenant's
+	// request-supplied kubeconfig and dial-addr. A listener stands in for
+	// KUBERNETES_DIAL_ADDR's target: it must never see a connection, since the
+	// caller passed dialAddr="" and the kubeconfig host cannot resolve.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	connCh := make(chan struct{}, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			connCh <- struct{}{}
+			_ = conn.Close()
+		}
+	}()
+
+	t.Setenv("KUBECONFIG_YAML", "not valid kubeconfig yaml")
+	t.Setenv("KUBERNETES_DIAL_ADDR", ln.Addr().String())
+
+	kubeconfig := fakeInlineKubeconfig(t, "https://kubernetes.does-not-resolve.internal:6443")
+	m, err := NewInlineKubeconfigManager(t.Context(), &config.StaticConfig{}, kubeconfig, "")
+	require.NoError(t, err)
+	t.Cleanup(m.Close)
+
+	_, _ = m.kubernetes.DiscoveryClient().ServerVersion()
+
+	select {
+	case <-connCh:
+		t.Fatal("KUBERNETES_DIAL_ADDR env leaked into the inline manager's dial")
+	case <-time.After(3 * time.Second):
+		// No connection reached the env-configured listener, as expected.
+	}
 }

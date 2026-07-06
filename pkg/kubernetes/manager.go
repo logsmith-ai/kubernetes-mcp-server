@@ -73,7 +73,12 @@ func NewKubeconfigManager(ctx context.Context, config api.BaseConfig, kubeconfig
 // (the raw YAML/JSON content), mirroring NewKubeconfigManager's path-based flow.
 // A non-nil but empty ClientConfigLoadingRules is used as the ConfigAccess so the
 // kubeconfig file watcher finds zero files to watch and no-ops cleanly.
-func newKubeconfigManagerFromBytes(ctx context.Context, config api.BaseConfig, raw []byte, kubeconfigContext string) (*Manager, error) {
+//
+// Each mutateRest fn is applied to the resolved restConfig before NewManager
+// runs, i.e. before NewKubernetes builds the clientset/dynamic/discovery
+// clients from it — mutating restConfig after NewManager returns would be too
+// late, since those clients are already constructed from a copy of it.
+func newKubeconfigManagerFromBytes(ctx context.Context, config api.BaseConfig, raw []byte, kubeconfigContext string, mutateRest ...func(*rest.Config)) (*Manager, error) {
 	apiConfig, err := clientcmd.Load(raw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig from KUBECONFIG_YAML: %w", err)
@@ -96,7 +101,35 @@ func newKubeconfigManagerFromBytes(ctx context.Context, config api.BaseConfig, r
 		return nil, fmt.Errorf("failed to create kubernetes rest config from kubeconfig: %w", err)
 	}
 
+	for _, mutate := range mutateRest {
+		mutate(restConfig)
+	}
+
 	return NewManager(ctx, config, restConfig, clientCmdConfig)
+}
+
+// NewInlineKubeconfigManager builds a Manager from request-supplied kubeconfig
+// bytes and an optional per-tenant socket dial override. This is the
+// multi-tenant HTTP path: unlike NewKubeconfigManager it never consults the
+// KUBECONFIG_YAML / KUBERNETES_DIAL_ADDR environment variables — a process-wide
+// override would leak across tenants on a shared server.
+func NewInlineKubeconfigManager(ctx context.Context, config api.BaseConfig, kubeconfig []byte, dialAddr string) (*Manager, error) {
+	// Always set restConfig.Dial explicitly, even when dialAddr is empty: this
+	// marks the dial decision as already made, so NewManager's
+	// KUBERNETES_DIAL_ADDR fallback (guarded on restConfig.Dial == nil) never
+	// fires for a request-supplied kubeconfig, regardless of the shared
+	// server's process environment. When dialAddr is empty, the dialer simply
+	// dials whatever address is requested (identical to the client-go default).
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	mutateRest := func(restConfig *rest.Config) {
+		restConfig.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if dialAddr != "" {
+				address = dialAddr
+			}
+			return d.DialContext(ctx, network, address)
+		}
+	}
+	return newKubeconfigManagerFromBytes(ctx, config, kubeconfig, "", mutateRest)
 }
 
 // resolveKubeconfigContext determines which kubeconfig context to use.
@@ -223,8 +256,13 @@ func NewManager(ctx context.Context, config api.BaseConfig, restConfig *rest.Con
 	// but the socket lands on the loopback tunnel proxy (127.0.0.1:PORT).
 	// rest.CopyConfig (in NewKubernetes) copies Dial, so this propagates to the
 	// clientset, dynamic, discovery and metrics clients built from restConfig.
-	if dial := dialAddrOverride(); dial != nil {
-		restConfig.Dial = dial
+	// Skipped when restConfig.Dial is already set (e.g. by
+	// NewInlineKubeconfigManager's per-tenant override): a process-wide env
+	// knob must never clobber a caller-supplied dial override.
+	if restConfig.Dial == nil {
+		if dial := dialAddrOverride(); dial != nil {
+			restConfig.Dial = dial
+		}
 	}
 
 	k8s := &Manager{
